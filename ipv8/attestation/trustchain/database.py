@@ -3,7 +3,10 @@ This file contains everything related to persistence for TrustChain.
 """
 from __future__ import absolute_import
 
+import csv
+import functools
 import os
+import time
 from binascii import hexlify
 
 from six import text_type
@@ -13,6 +16,28 @@ from ...database import Database, database_blob
 
 DATABASE_DIRECTORY = os.path.join(u"sqlite")
 
+def measure_time(func):
+    """
+    Measure time of the query and save to csv file
+    """
+    @functools.wraps(func)
+    def wrapper_measure_time(self, *args, **kwargs):
+        start = time.time()
+        value = func(self, *args, **kwargs)
+        end = time.time()
+        runtime = end - start
+        args_repr = [repr(a) for a in args]
+        kwargs_repr = [repr(k) + "=" + repr(v) for k, v in kwargs.items()]
+        params = ", ".join(args_repr + kwargs_repr)
+        work_dir = self.work_dir
+        if work_dir is None or work_dir == u":memory:":
+            work_dir = ""
+        with open(os.path.join(work_dir, 'query_time.csv'), 'ab') as f:
+            writer = csv.writer(f)
+            writer.writerow([func.__name__, params, runtime])
+        return value
+
+    return wrapper_measure_time
 
 class TrustChainDB(Database):
     """
@@ -37,8 +62,10 @@ class TrustChainDB(Database):
         self._logger.debug("TrustChain database path: %s", db_path)
         self.db_name = db_name
         self.block_types = {}
+        self.work_dir = working_directory
         self.open()
 
+    @measure_time
     def get_block_class(self, block_type):
         """
         Get the block class for a specific block type.
@@ -48,6 +75,7 @@ class TrustChainDB(Database):
 
         return self.block_types[block_type]
 
+    @measure_time
     def add_block(self, block):
         """
         Persist a block
@@ -59,6 +87,7 @@ class TrustChainDB(Database):
             block.pack_db_insert())
         self.commit()
 
+    @measure_time
     def remove_block(self, block):
         """
         DANGER! USING THIS WILL LIKELY CAUSE A DOUBLE-SPEND IN THE NETWORK.
@@ -82,6 +111,7 @@ class TrustChainDB(Database):
         db_result = list(self.execute(self.get_sql_header() + query, params, fetch_all=True))
         return [self.get_block_class(db_item[0])(db_item) for db_item in db_result]
 
+    @measure_time
     def get(self, public_key, sequence_number):
         """
         Get a specific block for a given public key
@@ -91,6 +121,7 @@ class TrustChainDB(Database):
         """
         return self._get(u"WHERE public_key = ? AND sequence_number = ?", (database_blob(public_key), sequence_number))
 
+    @measure_time
     def get_all_blocks(self):
         """
         Return all blocks in the database.
@@ -98,6 +129,7 @@ class TrustChainDB(Database):
         """
         return self._getall(u"", ())
 
+    @measure_time
     def get_number_of_known_blocks(self, public_key=None):
         """
         Return the total number of blocks in the database or the number of known blocks for a specific user.
@@ -107,6 +139,7 @@ class TrustChainDB(Database):
                                      (database_blob(public_key), )))[0][0]
         return list(self.execute(u"SELECT COUNT(*) FROM blocks"))[0][0]
 
+    @measure_time
     def remove_old_blocks(self, num_blocks_to_remove, my_pub_key):
         """
         Remove old blocks from the database.
@@ -118,6 +151,7 @@ class TrustChainDB(Database):
                      u" ORDER BY block_timestamp LIMIT ?)",
                      (database_blob(my_pub_key), database_blob(my_pub_key), num_blocks_to_remove))
 
+    @measure_time
     def get_block_with_hash(self, block_hash):
         """
         Return the block with a specific hash or None if it's not available in the database.
@@ -125,6 +159,7 @@ class TrustChainDB(Database):
         """
         return self._get(u"WHERE block_hash = ?", (database_blob(block_hash),))
 
+    @measure_time
     def get_blocks_with_type(self, block_type, public_key=None):
         """
         Return all blocks with a specific type.
@@ -136,6 +171,7 @@ class TrustChainDB(Database):
             return self._getall(u"WHERE type = ? and public_key = ?", (block_type, database_blob(public_key)))
         return self._getall(u"WHERE type = ?", (block_type,))
 
+    @measure_time
     def contains(self, block):
         """
         Check if a block is existent in the persistence layer.
@@ -144,6 +180,7 @@ class TrustChainDB(Database):
         """
         return self.get(block.public_key, block.sequence_number) is not None
 
+    @measure_time
     def get_latest(self, public_key, block_type=None):
         """
         Get the latest block for a given public key
@@ -159,6 +196,7 @@ class TrustChainDB(Database):
             return self._get(u"WHERE public_key = ? AND sequence_number = (SELECT MAX(sequence_number) FROM blocks "
                              u"WHERE public_key = ?)", (database_blob(public_key), database_blob(public_key)))
 
+    @measure_time
     def get_latest_blocks(self, public_key, limit=25, block_type=None):
         if block_type:
             return self._getall(u"WHERE public_key = ? AND type = ? ORDER BY sequence_number DESC LIMIT ?",
@@ -167,6 +205,7 @@ class TrustChainDB(Database):
             return self._getall(u"WHERE public_key = ? ORDER BY sequence_number DESC LIMIT ?",
                                 (database_blob(public_key), limit))
 
+    @measure_time
     def get_block_after(self, block, block_type=None):
         """
         Returns database block with the lowest sequence number higher than the block's sequence_number
@@ -181,6 +220,7 @@ class TrustChainDB(Database):
             return self._get(u"WHERE sequence_number > ? AND public_key = ? ORDER BY sequence_number ASC",
                              (block.sequence_number, database_blob(block.public_key)))
 
+    @measure_time
     def get_block_before(self, block, block_type=None):
         """
         Returns database block with the highest sequence number lower than the block's sequence_number
@@ -194,6 +234,7 @@ class TrustChainDB(Database):
             return self._get(u"WHERE sequence_number < ? AND public_key = ? ORDER BY sequence_number DESC",
                              (block.sequence_number, database_blob(block.public_key)))
 
+    @measure_time
     def get_lowest_sequence_number_unknown(self, public_key):
         """
         Return the lowest sequence number that we don't have a block of in the chain of a specific peer.
@@ -211,6 +252,7 @@ class TrustChainDB(Database):
         db_result = list(self.execute(query, (database_blob(public_key), database_blob(public_key)), fetch_all=True))
         return db_result[0][0] + 1 if db_result else 1
 
+    @measure_time
     def get_lowest_range_unknown(self, public_key):
         """
         Get the range of blocks (created by the peer with public_key) that we do not have yet.
@@ -230,6 +272,7 @@ class TrustChainDB(Database):
         else:
             return lowest_unknown, lowest_unknown
 
+    @measure_time
     def get_linked(self, block):
         """
         Get the block that is linked to the given block
@@ -241,6 +284,7 @@ class TrustChainDB(Database):
                          (database_blob(block.link_public_key), block.link_sequence_number,
                           database_blob(block.public_key), block.sequence_number))
 
+    @measure_time
     def get_all_linked(self, block):
         """
         Return all linked blocks for a specific block.
@@ -252,6 +296,7 @@ class TrustChainDB(Database):
                                                           block.link_sequence_number, database_blob(block.public_key),
                                                           block.sequence_number))
 
+    @measure_time
     def crawl(self, public_key, start_seq_num, end_seq_num, limit=100):
         query = u"SELECT * FROM (%s WHERE sequence_number >= ? AND sequence_number <= ? AND public_key = ? LIMIT ?) " \
                 u"UNION SELECT * FROM (%s WHERE link_sequence_number >= ? AND link_sequence_number <= ? AND " \
@@ -262,12 +307,14 @@ class TrustChainDB(Database):
                                       fetch_all=True))
         return [self.get_block_class(db_item[0])(db_item) for db_item in db_result]
 
+    @measure_time
     def get_recent_blocks(self, limit=10, offset=0):
         """
         Return the most recent blocks in the TrustChain database.
         """
         return self._getall(u"ORDER BY block_timestamp DESC LIMIT ? OFFSET ?", (limit, offset))
 
+    @measure_time
     def get_users(self, limit=100):
         """
         Return information about the users in the database
@@ -283,6 +330,7 @@ class TrustChainDB(Database):
             })
         return users_info
 
+    @measure_time
     def get_connected_users(self, public_key, limit=100):
         """
         Return a list of connected users for a user with the given public key.
@@ -307,6 +355,7 @@ class TrustChainDB(Database):
             })
         return users_info
 
+    @measure_time
     def add_double_spend(self, block1, block2):
         """
         Add information about a double spend to the database.
@@ -317,6 +366,7 @@ class TrustChainDB(Database):
         self.execute(sql, block2.pack_db_insert())
         self.commit()
 
+    @measure_time
     def did_double_spend(self, public_key):
         """
         Return whether a specific user did a double spend in the past.
@@ -325,6 +375,7 @@ class TrustChainDB(Database):
                                   (database_blob(public_key),)))[0][0]
         return count > 0
 
+    @measure_time
     def get_sql_header(self):
         """
         Return the first part of a generic sql select query.
@@ -333,6 +384,7 @@ class TrustChainDB(Database):
                    u"previous_hash, signature, block_timestamp, insert_time"
         return u"SELECT " + _columns + u" FROM blocks "
 
+    @measure_time
     def get_sql_create_blocks_table(self, table_name, primary_key):
         return u"""
         CREATE TABLE IF NOT EXISTS %s(
@@ -387,12 +439,14 @@ class TrustChainDB(Database):
         elif current_version == 5:
             return self.get_sql_create_blocks_table("double_spends", "public_key, sequence_number, block_hash")
 
+    @measure_time
     def open(self, initial_statements=True, prepare_visioning=True):
         return super(TrustChainDB, self).open(initial_statements, prepare_visioning)
 
     def close(self, commit=True):
         return super(TrustChainDB, self).close(commit)
 
+    @measure_time
     def check_database(self, database_version):
         """
         Ensure the proper schema is used by the database.
